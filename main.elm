@@ -2,7 +2,7 @@ module Main where
 
 import Time
 import Window
-import Automaton (Automaton, hiddenState, step)
+import Automaton (Automaton, hiddenState, step, pure)
 
 -- rules
 -- |Turn rate in degrees per tick
@@ -29,13 +29,21 @@ maxDeceleration : Float
 maxDeceleration = 1
 
 -- core
-type World  = {
-   worldBots    : [(Automaton DashBoard Command, BotState)],
-   worldBullets : [Bullet]
-   --_worldBox     :: BoundingBox
+type BoundingBox = {
+  minX  : Int,
+  minY  : Int,
+  maxX  : Int,
+  maxY  : Int
 }
 
-defaultWorld = {worldBots = [(makeBot "Retardon" 200 200 circleBot)], worldBullets = []}
+type World  = {
+   worldBots    : [(Automaton DashBoard Command, BotState)],
+   worldBullets : [Bullet],
+   worldBox     : BoundingBox
+}
+
+defaultBox = {minX = 50, minY = 50, maxX = 500, maxY = 500}
+defaultWorld = {worldBots = [(makeBot "Retardon" 150 150 circleBot),(makeBot "Rammer" 100 100 rammingBot)], worldBullets = [], worldBox = defaultBox}
 
 type Point = { x:Float, y:Float }
 toPoint (x,y) = {x=x,y=y}
@@ -58,7 +66,7 @@ type Bullet = {
 
 type DashBoard = {
 --    dashRadar     : ScanResult
---  , dashWallHit   : Collision,
+  dashWallHit   : Bool,--dashWallHit   : Collision,
   dashVelocity  : Point
   }
 
@@ -78,20 +86,32 @@ circleBotStep _ lastAcc = if lastAcc then (Turn 5,False) else (Accelerate 1,True
 circleBot : Automaton DashBoard Command
 circleBot = hiddenState False circleBotStep
 
+fireBot : Automaton DashBoard Command
+fireBot = pure (\_ -> Fire)
+
+sittingDuck : Automaton DashBoard Command
+sittingDuck = pure (\_ -> MoveTurret 1)
+
+rammingBot : Automaton DashBoard Command
+rammingBot = pure (\_ -> Accelerate 0.01)
+
 -- tick :: Signal Time
 tick = fps 30
 --Automaton DashBoard Command
 makeBot : String -> Float -> Float -> Automaton DashBoard Command -> (Automaton DashBoard Command,BotState)
 makeBot name x y program = (program,{botName = name,
   botPosition = {x=x,y=y},
-  botAngle = 0,
-  botVelocity = zeroPoint,
+  botAngle = 3*pi/2,
+  botVelocity = fromPolar (1,3*pi/2) |> toPoint,
   botTurret = zeroPoint,
   botRadar = zeroPoint,
   botLastCmd = NoAction})
 
-updateBotPosition : BotState -> BotState
-updateBotPosition b = {b | botPosition <- {x=b.botPosition.x + b.botVelocity.x,y=b.botPosition.y + b.botVelocity.y}}
+updateBotPosition : BoundingBox -> BotState -> BotState
+updateBotPosition bbox b =
+  let newX = clamp (-(toFloat bbox.maxX / 2) + toFloat bbox.minX) (toFloat bbox.maxX / 2 - toFloat bbox.minX) (b.botPosition.x + b.botVelocity.x)
+      newY = clamp (-(toFloat bbox.maxY / 2) + toFloat bbox.minY) (toFloat bbox.maxY / 2 - toFloat bbox.minY) (b.botPosition.y + b.botVelocity.y)
+  in {b | botPosition <- {x=newX,y=newY}}
 
 updateBotSpeed : Float -> Float -> Float -> BotState -> BotState
 updateBotSpeed acc maxAcc maxSpeed b =
@@ -111,19 +131,22 @@ updateBotDir degTurn maxDeg b =
   in
     {b | botVelocity <- carts, botAngle <- (theta + newTurn)}
 
+near k c n = n >= k-c && n <= k+c
 
-stepBot : (Automaton DashBoard Command,BotState) -> (Automaton DashBoard Command,BotState)
-stepBot (a,b) = let (newA, cmd) = step {dashVelocity=b.botVelocity} a
-  in case cmd of NoAction -> (newA,updateBotPosition b)
-                 Turn d -> (newA, updateBotDir d turnRate b |> updateBotPosition)
-                 Accelerate x -> (newA, updateBotSpeed x maxAcceleration maxSpeed b |> updateBotPosition)
-                 _ -> (newA,updateBotPosition b)
+stepBot : World -> (Automaton DashBoard Command,BotState) -> (Automaton DashBoard Command,BotState)
+stepBot w (a,b) =
+  let hitwall = False--(near b.botPosition.x w.worldBox.maxX 8) || (near b.botPosition.x w.worldBox.minX 8) || (near b.botPosition.y w.worldBox.maxY 8) || (near b.botPosition.y w.worldBox.minY 8)
+      (newA, cmd) = step {dashVelocity=b.botVelocity,dashWallHit=hitwall} a
+  in case cmd of NoAction -> (newA,updateBotPosition w.worldBox b)
+                 Turn d -> (newA, updateBotDir d turnRate b |> updateBotPosition w.worldBox)
+                 Accelerate x -> (newA, updateBotSpeed x maxAcceleration maxSpeed b |> updateBotPosition w.worldBox)
+                 _ -> (newA,updateBotPosition w.worldBox b)
 
 stepBullet : Bullet -> Bullet
 stepBullet b = {b | bulletPosition <- {x=b.bulletPosition.x + b.bulletVelocity.x,y=b.bulletPosition.y + b.bulletVelocity.y}}
 
 stepWorld : Float -> World -> World
-stepWorld t w = {w | worldBots <- (map stepBot w.worldBots)}
+stepWorld t w = {w | worldBots <- (map (stepBot w) w.worldBots)}
 
 worldState : Signal World
 worldState = foldp stepWorld defaultWorld tick
@@ -134,8 +157,14 @@ drawTank (a,b) = move (b.botPosition.x, b.botPosition.y) (rotate b.botAngle (fil
              , fittedImage 36 38 "res/body.png" ]))
 -}
 
+
 display (w, h) (world) =
-  collage w h ( map drawTank (world.worldBots)
+  let shiftX = world.worldBox.minX
+      shiftY = world.worldBox.minY
+      rw = world.worldBox.maxX - shiftX
+      rh = world.worldBox.maxY - shiftY
+  in
+  collage w h ( (outlined (dashed grey) (rect (toFloat rw) (toFloat rh))) :: map drawTank (world.worldBots)
               )
 
 main = lift2 display Window.dimensions worldState
