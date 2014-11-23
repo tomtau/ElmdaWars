@@ -43,7 +43,7 @@ type World  = {
 }
 
 defaultBox = {minX = 50, minY = 50, maxX = 500, maxY = 500}
-defaultWorld = {worldBots = [(makeBot "Retardon" 150 150 circleBot),(makeBot "Rammer" 100 100 rammingBot)], worldBullets = [], worldBox = defaultBox}
+defaultWorld = {worldBots = [(makeBot "Retardon" 150 150 circleBot),(makeBot "Rammer" 100 100 rammingBot),(makeBot "TurretTest" -50 -50 sittingDuck)], worldBullets = [], worldBox = defaultBox}
 
 type Point = { x:Float, y:Float }
 toPoint (x,y) = {x=x,y=y}
@@ -101,9 +101,9 @@ tick = fps 30
 makeBot : String -> Float -> Float -> Automaton DashBoard Command -> (Automaton DashBoard Command,BotState)
 makeBot name x y program = (program,{botName = name,
   botPosition = {x=x,y=y},
-  botAngle = 3*pi/2,
-  botVelocity = fromPolar (1,3*pi/2) |> toPoint,
-  botTurret = zeroPoint,
+  botAngle = 0,
+  botVelocity = zeroPoint,
+  botTurret = {x=1,y=0},
   botRadar = zeroPoint,
   botLastCmd = NoAction})
 
@@ -131,6 +131,15 @@ updateBotDir degTurn maxDeg b =
   in
     {b | botVelocity <- carts, botAngle <- (theta + newTurn)}
 
+updateTurrDir : Float -> Float -> BotState -> BotState
+updateTurrDir degTurn maxDeg b =
+  let newDeg = clamp (-maxDeg) maxDeg degTurn
+      newTurn = radians newDeg
+      (r,theta) = toPolar (b.botTurret.x,b.botTurret.y)
+      carts = fromPolar (r,theta + newTurn) |> toPoint
+  in
+    {b | botTurret <- carts}
+
 near k c n = n >= k-c && n <= k+c
 
 stepBot : World -> (Automaton DashBoard Command,BotState) -> (Automaton DashBoard Command,BotState)
@@ -140,6 +149,7 @@ stepBot w (a,b) =
   in case cmd of NoAction -> (newA,updateBotPosition w.worldBox b)
                  Turn d -> (newA, updateBotDir d turnRate b |> updateBotPosition w.worldBox)
                  Accelerate x -> (newA, updateBotSpeed x maxAcceleration maxSpeed b |> updateBotPosition w.worldBox)
+                 MoveTurret d -> (newA, updateTurrDir d turretTurnRate b |> updateBotPosition w.worldBox)
                  _ -> (newA,updateBotPosition w.worldBox b)
 
 stepBullet : Bullet -> Bullet
@@ -157,6 +167,22 @@ drawTank (a,b) = move (b.botPosition.x, b.botPosition.y) (rotate b.botAngle (fil
              , fittedImage 36 38 "res/body.png" ]))
 -}
 
+turret =
+  let c = 20
+      wh = 2 * c + 1
+      len = 12
+      side = 8
+      gauge = 2
+      pill = filled grey (rect len side) --(c,c)
+      barrel = filled grey (rect (2 * len) gauge) --(c+len, c)
+
+  in collage wh wh [ pill, move (len, 0) barrel ]
+
+drawTurret (a,b) =
+  let coord = (b.botPosition.x, b.botPosition.y)
+      (r,theta) = toPolar (b.botTurret.x,b.botTurret.y)
+  in rotate (theta) (move coord (toForm turret))
+
 
 display (w, h) (world) =
   let shiftX = world.worldBox.minX
@@ -164,7 +190,7 @@ display (w, h) (world) =
       rw = world.worldBox.maxX - shiftX
       rh = world.worldBox.maxY - shiftY
   in
-  collage w h ( (outlined (dashed grey) (rect (toFloat rw) (toFloat rh))) :: map drawTank (world.worldBots)
+  collage w h ( (outlined (dashed grey) (rect (toFloat rw) (toFloat rh))) :: map drawTank (world.worldBots) ++ map drawTurret (world.worldBots)
               )
 
 main = lift2 display Window.dimensions worldState
