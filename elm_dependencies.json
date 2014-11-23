@@ -6,7 +6,8 @@
     "exposed-modules": [],
     "elm-version": "0.13",
     "dependencies": {
-        "evancz/automaton": "1.0.1"
+        "evancz/automaton": "1.0.1",
+        "johnpmayer/elm-linear-algebra": "1.0.1"
     },
     "repository": "https://github.com/USER/PROJECT.git"
 }

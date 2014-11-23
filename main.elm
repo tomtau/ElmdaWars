@@ -3,22 +3,28 @@ module Main where
 import Time
 import Window
 import Automaton (Automaton, hiddenState, step, pure)
+import Math.Vector2 (..)
+import Either
+import Either (..)
 
 -- rules
 -- |Turn rate in degrees per tick
-turnRate : Float
+turnRate : Degree
 turnRate = 5
 
 -- |Radar turn rate in degrees per tick
-radarTurnRate : Float
+radarTurnRate : Degree
 radarTurnRate  = 15
 
 -- |Turret turn rate in degrees per tick
-turretTurnRate : Float
+turretTurnRate : Degree
 turretTurnRate = 10
 
 -- |Max speed in pixles per tick
 maxSpeed       = 3
+
+-- |Bullet speed in pixles per tick
+bulletSpeed       = 40
 
 -- |Max acceleration in pixels per tick per tick
 maxAcceleration : Float
@@ -43,13 +49,15 @@ type World  = {
 }
 
 defaultBox = {minX = 50, minY = 50, maxX = 500, maxY = 500}
-defaultWorld = {worldBots = [(makeBot "Retardon" 150 150 circleBot),(makeBot "Rammer" 100 100 rammingBot),(makeBot "TurretTest" -50 -50 sittingDuck)], worldBullets = [], worldBox = defaultBox}
+defaultWorld = {worldBots = [(makeBot "Retardon" 150 150 circleBot),
+        (makeBot "Rammer" 100 100 rammingBot),
+        (makeBot "TurretTest" -50 -50 sittingDuck),
+        (makeBot "FireTest" -50 0 fireBot)], worldBullets = [], worldBox = defaultBox}
 
-type Point = { x:Float, y:Float }
-toPoint (x,y) = {x=x,y=y}
-type Direction = Point
-zeroPoint = {x=0, y=0}
+type Point = Vec2
+type Direction = Vec2
 type Degree = Float
+type Radian = Float
 
 data Command = NoAction
               | Turn Degree
@@ -61,20 +69,24 @@ data Command = NoAction
 
 type Bullet = {
   bulletPosition  : Point,
-  bulletVelocity  : Point
+  bulletVelocity  : Direction
 }
+
+data BulletHit = BHWall | BHBot
+
+type Collision = Bool
 
 type DashBoard = {
 --    dashRadar     : ScanResult
-  dashWallHit   : Bool,--dashWallHit   : Collision,
-  dashVelocity  : Point
+  dashWallHit   : Collision,
+  dashVelocity  : Direction
   }
 
 type BotState = {
   botName     : String,
   botPosition : Point,
-  botAngle : Float,
-  botVelocity : Point,
+  botAngle : Radian,
+  botVelocity : Direction,
   botTurret   : Direction,
   botRadar    : Direction,
   botLastCmd  : Command -- ^ useful for logging
@@ -100,68 +112,102 @@ tick = fps 30
 --Automaton DashBoard Command
 makeBot : String -> Float -> Float -> Automaton DashBoard Command -> (Automaton DashBoard Command,BotState)
 makeBot name x y program = (program,{botName = name,
-  botPosition = {x=x,y=y},
+  botPosition = vec2 x y,
   botAngle = 0,
-  botVelocity = zeroPoint,
-  botTurret = {x=1,y=0},
-  botRadar = zeroPoint,
+  botVelocity = vec2 0 0,
+  botTurret = vec2 1 0,
+  botRadar = vec2 1 0,
   botLastCmd = NoAction})
+
+makeBullet : Float -> Float -> Float -> Float -> Bullet
+makeBullet x y rx ry = {bulletPosition = vec2 x y, bulletVelocity = vec2 rx ry}
+
+hitBox : BoundingBox -> Float -> Point -> Bool
+hitBox bbox d p =
+  let minX = -(toFloat bbox.maxX / 2) + toFloat bbox.minX + d
+      maxX = toFloat bbox.maxX / 2 - toFloat bbox.minX - d
+      minY = -(toFloat bbox.maxY / 2) + toFloat bbox.minY + d
+      maxY = toFloat bbox.maxY / 2 - toFloat bbox.minY - d
+      x = getX p
+      y = getY p
+  in (x <= minX) || (x >= maxX) || (y <= minY) || (y >= maxY)
 
 updateBotPosition : BoundingBox -> BotState -> BotState
 updateBotPosition bbox b =
-  let newX = clamp (-(toFloat bbox.maxX / 2) + toFloat bbox.minX) (toFloat bbox.maxX / 2 - toFloat bbox.minX) (b.botPosition.x + b.botVelocity.x)
-      newY = clamp (-(toFloat bbox.maxY / 2) + toFloat bbox.minY) (toFloat bbox.maxY / 2 - toFloat bbox.minY) (b.botPosition.y + b.botVelocity.y)
-  in {b | botPosition <- {x=newX,y=newY}}
+  let newPosition = add b.botPosition b.botVelocity
+      clamped = vec2 (clamp (-(toFloat bbox.maxX / 2) + toFloat bbox.minX)
+                      (toFloat bbox.maxX / 2 - toFloat bbox.minX)
+                      (getX newPosition))
+                      (clamp (-(toFloat bbox.maxY / 2) + toFloat bbox.minY)
+                      (toFloat bbox.maxY / 2 - toFloat bbox.minY)
+                      (getY newPosition))
+  in {b | botPosition <- clamped}
 
 updateBotSpeed : Float -> Float -> Float -> BotState -> BotState
 updateBotSpeed acc maxAcc maxSpeed b =
-  let newAcc = clamp (-maxAcc) maxAcc acc
-      (r,theta) = toPolar (b.botVelocity.x,b.botVelocity.y)
+  let newAcc = if (maxAcc > 0) then clamp 0 maxAcc acc else clamp maxAcc 0 acc
+      (r,theta) = toPolar (b.botVelocity |> toTuple)
       newSpeed = clamp 0 maxSpeed (r+newAcc)
-      carts = fromPolar (newSpeed,theta) |> toPoint
+      carts = fromPolar (newSpeed,theta) |> fromTuple
   in
     {b | botVelocity <- carts}
 
-updateBotDir : Float -> Float -> BotState -> BotState
+updateBotDir : Degree -> Degree -> BotState -> BotState
 updateBotDir degTurn maxDeg b =
   let newDeg = clamp (-maxDeg) maxDeg degTurn
       newTurn = radians newDeg
-      (r,theta) = toPolar (b.botVelocity.x,b.botVelocity.y)
-      carts = fromPolar (r,theta + newTurn) |> toPoint
+      (r,theta) = toPolar (b.botVelocity |> toTuple)
+      carts = fromPolar (r,theta + newTurn) |> fromTuple
   in
     {b | botVelocity <- carts, botAngle <- (theta + newTurn)}
 
-updateTurrDir : Float -> Float -> BotState -> BotState
+updateTurrDir : Degree -> Degree -> BotState -> BotState
 updateTurrDir degTurn maxDeg b =
   let newDeg = clamp (-maxDeg) maxDeg degTurn
       newTurn = radians newDeg
-      (r,theta) = toPolar (b.botTurret.x,b.botTurret.y)
-      carts = fromPolar (r,theta + newTurn) |> toPoint
+      (r,theta) = toPolar (b.botTurret |> toTuple)
+      carts = fromPolar (r,theta + newTurn) |> fromTuple
   in
     {b | botTurret <- carts}
 
-near k c n = n >= k-c && n <= k+c
+fireBullet : BotState -> Bullet
+fireBullet b =
+  let (r,theta) = toPolar (b.botTurret |> toTuple)
+      bulVel = fromPolar (bulletSpeed, theta) |> fromTuple
+      bulPos = add b.botPosition bulVel
+  in {bulletPosition=bulPos, bulletVelocity=bulVel}
 
-stepBot : World -> (Automaton DashBoard Command,BotState) -> (Automaton DashBoard Command,BotState)
+stepBot : World -> (Automaton DashBoard Command,BotState) -> ((Automaton DashBoard Command,BotState),Maybe Bullet)
 stepBot w (a,b) =
-  let hitwall = False--(near b.botPosition.x w.worldBox.maxX 8) || (near b.botPosition.x w.worldBox.minX 8) || (near b.botPosition.y w.worldBox.maxY 8) || (near b.botPosition.y w.worldBox.minY 8)
+  let hitwall = hitBox w.worldBox 1 b.botPosition
       (newA, cmd) = step {dashVelocity=b.botVelocity,dashWallHit=hitwall} a
-  in case cmd of NoAction -> (newA,updateBotPosition w.worldBox b)
-                 Turn d -> (newA, updateBotDir d turnRate b |> updateBotPosition w.worldBox)
-                 Accelerate x -> (newA, updateBotSpeed x maxAcceleration maxSpeed b |> updateBotPosition w.worldBox)
-                 MoveTurret d -> (newA, updateTurrDir d turretTurnRate b |> updateBotPosition w.worldBox)
-                 _ -> (newA,updateBotPosition w.worldBox b)
+  in case cmd of NoAction -> ((newA,updateBotPosition w.worldBox b),Nothing)
+                 Turn d -> ((newA, updateBotDir d turnRate b |> updateBotPosition w.worldBox),Nothing)
+                 Accelerate x -> ((newA, updateBotSpeed (abs x) maxAcceleration maxSpeed b |> updateBotPosition w.worldBox),Nothing)
+                 Decelerate x -> ((newA, updateBotSpeed (-(abs x)) maxDeceleration maxSpeed b |> updateBotPosition w.worldBox),Nothing)
+                 MoveTurret d -> ((newA, updateTurrDir d turretTurnRate b |> updateBotPosition w.worldBox),Nothing)
+                 Fire -> ((newA,updateBotPosition w.worldBox b),Just (fireBullet b))
+                 _ -> ((newA,updateBotPosition w.worldBox b),Nothing)
 
-stepBullet : Bullet -> Bullet
-stepBullet b = {b | bulletPosition <- {x=b.bulletPosition.x + b.bulletVelocity.x,y=b.bulletPosition.y + b.bulletVelocity.y}}
+stepBullet : World -> Bullet -> Either Bullet BulletHit
+stepBullet w b =
+  let newBP = add b.bulletPosition b.bulletVelocity
+      hitwall = hitBox w.worldBox 1 newBP
+  in if hitwall then Right BHWall else Left {b | bulletPosition <- newBP}
 
 stepWorld : Float -> World -> World
-stepWorld t w = {w | worldBots <- (map (stepBot w) w.worldBots)}
+stepWorld t w =
+  let bullets = map (stepBullet w) w.worldBullets
+      botsB = map (stepBot w) w.worldBots
+      newBullets = map snd botsB |> concatMap (\x ->
+        case x of Just y -> [y]
+                  Nothing -> [])
+  in {w | worldBots <- (map fst botsB), worldBullets <- (newBullets ++ lefts bullets)}
 
 worldState : Signal World
 worldState = foldp stepWorld defaultWorld tick
 
-drawTank (a,b) = move (b.botPosition.x, b.botPosition.y) (rotate b.botAngle (filled black (rect 30 20)))
+drawTank (a,b) = move (b.botPosition |> toTuple) (rotate b.botAngle (filled black (rect 30 20)))
 {-
 (toForm (flow inward [ fittedImage 22 16 "res/radar.png", fittedImage 20 54 "res/turret.png"
              , fittedImage 36 38 "res/body.png" ]))
@@ -173,16 +219,18 @@ turret =
       len = 12
       side = 8
       gauge = 2
-      pill = filled grey (rect len side) --(c,c)
-      barrel = filled grey (rect (2 * len) gauge) --(c+len, c)
+      pill = filled grey (rect len side)
+      barrel = filled grey (rect (2 * len) gauge)
 
   in collage wh wh [ pill, move (len, 0) barrel ]
 
 drawTurret (a,b) =
-  let coord = (b.botPosition.x, b.botPosition.y)
-      (r,theta) = toPolar (b.botTurret.x,b.botTurret.y)
+  let coord = b.botPosition |> toTuple
+      (r,theta) = toPolar (b.botTurret |> toTuple)
   in rotate (theta) (move coord (toForm turret))
 
+drawBullet b =
+  move (b.bulletPosition |> toTuple) (filled green (circle 3))
 
 display (w, h) (world) =
   let shiftX = world.worldBox.minX
@@ -190,7 +238,10 @@ display (w, h) (world) =
       rw = world.worldBox.maxX - shiftX
       rh = world.worldBox.maxY - shiftY
   in
-  collage w h ( (outlined (dashed grey) (rect (toFloat rw) (toFloat rh))) :: map drawTank (world.worldBots) ++ map drawTurret (world.worldBots)
+  collage w h ( (outlined (dashed grey) (rect (toFloat rw) (toFloat rh)))
+    :: map drawTank (world.worldBots)
+    ++ map drawTurret (world.worldBots)
+    ++ map drawBullet (world.worldBullets)
               )
 
 main = lift2 display Window.dimensions worldState
