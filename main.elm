@@ -3,9 +3,11 @@ module Main where
 import Time
 import Window
 import Automaton (Automaton, hiddenState, step, pure)
+import Math.Vector2
 import Math.Vector2 (..)
 import Either
 import Either (..)
+import Debug
 
 -- rules
 -- |Turn rate in degrees per tick
@@ -26,6 +28,8 @@ maxSpeed       = 3
 -- |Bullet speed in pixles per tick
 bulletSpeed       = 40
 
+radarRange = 100 -- 1200?
+
 -- |Max acceleration in pixels per tick per tick
 maxAcceleration : Float
 maxAcceleration = 0.4
@@ -34,7 +38,7 @@ maxAcceleration = 0.4
 maxDeceleration : Float
 maxDeceleration = 1
 
--- core
+-- core // model
 type BoundingBox = {
   minX  : Int,
   minY  : Int,
@@ -52,7 +56,8 @@ defaultBox = {minX = 50, minY = 50, maxX = 500, maxY = 500}
 defaultWorld = {worldBots = [(makeBot "Retardon" 150 150 circleBot),
         (makeBot "Rammer" 100 100 rammingBot),
         (makeBot "TurretTest" -50 -50 sittingDuck),
-        (makeBot "FireTest" -50 0 fireBot)], worldBullets = [], worldBox = defaultBox}
+        (makeBot "FireTest" -50 0 fireBot),
+        (makeBot "RadarTest" 0 50 searchAndFire)], worldBullets = [], worldBox = defaultBox}
 
 type Point = Vec2
 type Direction = Vec2
@@ -67,30 +72,42 @@ data Command = NoAction
               | MoveRadar Degree
               | Fire
 
+-- TODO: bot that fired it
 type Bullet = {
   bulletPosition  : Point,
   bulletVelocity  : Direction
 }
 
+-- TODO: bot hit?
 data BulletHit = BHWall | BHBot
 
 type Collision = Bool
 
+-- TODO: extra info: bearing, ... (as in RoboCode)
+data ScanResult = BotFound --BotFound Double
+                | WallFound --WallFound Double
+                | NothingFound
+
 type DashBoard = {
---    dashRadar     : ScanResult
+  dashRadar     : ScanResult,
   dashWallHit   : Collision,
-  dashVelocity  : Direction
+  dashVelocity  : Direction,
+  dashTurret    : Direction,
+  dashRadarDir  : Direction
   }
 
+-- TODO: score, HP, ...
 type BotState = {
   botName     : String,
   botPosition : Point,
-  botAngle : Radian,
+  botAngle    : Radian,
   botVelocity : Direction,
   botTurret   : Direction,
   botRadar    : Direction,
   botLastCmd  : Command -- ^ useful for logging
 }
+
+-- BOTS
 -- hiddenState : s -> (i -> s -> (s,o)) -> Automaton i o
 circleBotStep : DashBoard -> Bool -> (Command,Bool)
 circleBotStep _ lastAcc = if lastAcc then (Turn 5,False) else (Accelerate 1,True)
@@ -107,8 +124,21 @@ sittingDuck = pure (\_ -> MoveTurret 1)
 rammingBot : Automaton DashBoard Command
 rammingBot = pure (\_ -> Accelerate 0.01)
 
+searchAndFire : Automaton DashBoard Command
+searchAndFire = pure (\d ->
+  let res = d.dashRadar
+      (_,ttheta) = toPolar (d.dashTurret |> toTuple) |> Debug.watch "ttheta"
+      (_,rtheta) = toPolar (d.dashRadarDir |> toTuple) |> Debug.watch "rtheta"
+  in case res of NothingFound -> MoveRadar 1
+                 WallFound -> MoveRadar 1
+                 BotFound -> if (abs (ttheta-rtheta) < 0.1) then Fire
+                             else MoveTurret (degrees (rtheta-ttheta))
+  )
+
 -- tick :: Signal Time
 tick = fps 30
+
+-- steps / updates / creations
 --Automaton DashBoard Command
 makeBot : String -> Float -> Float -> Automaton DashBoard Command -> (Automaton DashBoard Command,BotState)
 makeBot name x y program = (program,{botName = name,
@@ -152,6 +182,7 @@ updateBotSpeed acc maxAcc maxSpeed b =
   in
     {b | botVelocity <- carts}
 
+--TODO: copy-paste -> refactor
 updateBotDir : Degree -> Degree -> BotState -> BotState
 updateBotDir degTurn maxDeg b =
   let newDeg = clamp (-maxDeg) maxDeg degTurn
@@ -170,6 +201,15 @@ updateTurrDir degTurn maxDeg b =
   in
     {b | botTurret <- carts}
 
+updateRadarDir : Degree -> Degree -> BotState -> BotState
+updateRadarDir degTurn maxDeg b =
+  let newDeg = clamp (-maxDeg) maxDeg degTurn
+      newTurn = radians newDeg
+      (r,theta) = toPolar (b.botRadar |> toTuple)
+      carts = fromPolar (r,theta + newTurn) |> fromTuple
+  in
+    {b | botRadar <- carts}
+
 fireBullet : BotState -> Bullet
 fireBullet b =
   let (r,theta) = toPolar (b.botTurret |> toTuple)
@@ -177,17 +217,32 @@ fireBullet b =
       bulPos = add b.botPosition bulVel
   in {bulletPosition=bulPos, bulletVelocity=bulVel}
 
+inB : Point -> Point -> Point -> Bool
+inB start stop otherB =
+  let (firstR,firstTh) = toPolar (stop |> toTuple)
+      (otherPR,otherTh) = toPolar ((sub otherB start) |> toTuple)
+  in (firstTh - otherTh < 0.001) && (otherPR <= firstR)
+
+--TODO: wallscan
+scan : BotState -> [BotState] -> ScanResult
+scan b bs =
+  let start = b.botPosition
+      stop = (add b.botPosition (Math.Vector2.scale radarRange b.botRadar))
+      scanned = map (\x -> inB start stop x.botPosition) bs |> any (\x -> x)
+  in if scanned then BotFound else NothingFound
+
 stepBot : World -> (Automaton DashBoard Command,BotState) -> ((Automaton DashBoard Command,BotState),Maybe Bullet)
 stepBot w (a,b) =
   let hitwall = hitBox w.worldBox 1 b.botPosition
-      (newA, cmd) = step {dashVelocity=b.botVelocity,dashWallHit=hitwall} a
+      scanRes = scan b (map snd w.worldBots |> filter (\x -> x /= b))
+      (newA, cmd) = step {dashRadar=scanRes,dashVelocity=b.botVelocity,dashRadarDir=b.botRadar,dashTurret=b.botTurret,dashWallHit=hitwall} a
   in case cmd of NoAction -> ((newA,updateBotPosition w.worldBox b),Nothing)
                  Turn d -> ((newA, updateBotDir d turnRate b |> updateBotPosition w.worldBox),Nothing)
                  Accelerate x -> ((newA, updateBotSpeed (abs x) maxAcceleration maxSpeed b |> updateBotPosition w.worldBox),Nothing)
                  Decelerate x -> ((newA, updateBotSpeed (-(abs x)) maxDeceleration maxSpeed b |> updateBotPosition w.worldBox),Nothing)
                  MoveTurret d -> ((newA, updateTurrDir d turretTurnRate b |> updateBotPosition w.worldBox),Nothing)
+                 MoveRadar d -> ((newA, updateRadarDir d radarTurnRate b |> updateBotPosition w.worldBox),Nothing)
                  Fire -> ((newA,updateBotPosition w.worldBox b),Just (fireBullet b))
-                 _ -> ((newA,updateBotPosition w.worldBox b),Nothing)
 
 stepBullet : World -> Bullet -> Either Bullet BulletHit
 stepBullet w b =
@@ -206,6 +261,8 @@ stepWorld t w =
 
 worldState : Signal World
 worldState = foldp stepWorld defaultWorld tick
+
+-- graphics / view
 
 drawTank (a,b) = move (b.botPosition |> toTuple) (rotate b.botAngle (filled black (rect 30 20)))
 {-
@@ -229,6 +286,12 @@ drawTurret (a,b) =
       (r,theta) = toPolar (b.botTurret |> toTuple)
   in rotate (theta) (move coord (toForm turret))
 
+drawRadar (a,b) =
+  let coord = b.botPosition |> toTuple
+      endP = (add b.botPosition (Math.Vector2.scale radarRange b.botRadar)) |> toTuple
+      l = segment coord endP
+  in traced (solid red) l
+
 drawBullet b =
   move (b.bulletPosition |> toTuple) (filled green (circle 3))
 
@@ -241,6 +304,7 @@ display (w, h) (world) =
   collage w h ( (outlined (dashed grey) (rect (toFloat rw) (toFloat rh)))
     :: map drawTank (world.worldBots)
     ++ map drawTurret (world.worldBots)
+    ++ map drawRadar (world.worldBots)
     ++ map drawBullet (world.worldBullets)
               )
 
