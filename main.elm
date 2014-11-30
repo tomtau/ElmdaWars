@@ -8,6 +8,7 @@ import Math.Vector2 (..)
 import Either
 import Either (..)
 import Debug
+import Text
 
 -- rules
 -- |Turn rate in degrees per tick
@@ -221,7 +222,7 @@ inB : Point -> Point -> Point -> Bool
 inB start stop otherB =
   let (firstR,firstTh) = toPolar (stop |> toTuple)
       (otherPR,otherTh) = toPolar ((sub otherB start) |> toTuple)
-  in (firstTh - otherTh < 0.001) && (otherPR <= firstR)
+  in (abs (firstTh - otherTh) < 0.1) && (otherPR <= firstR)
 
 --TODO: wallscan
 scan : BotState -> [BotState] -> ScanResult
@@ -270,6 +271,8 @@ drawTank (a,b) = move (b.botPosition |> toTuple) (rotate b.botAngle (filled blac
              , fittedImage 36 38 "res/body.png" ]))
 -}
 
+drawName (a,b) = move (b.botPosition |> toTuple) (move (0,-20) (centered (bold (toText b.botName)) |> toForm))
+
 turret =
   let c = 20
       wh = 2 * c + 1
@@ -305,6 +308,7 @@ display (w, h) (world) =
     :: map drawTank (world.worldBots)
     ++ map drawTurret (world.worldBots)
     ++ map drawRadar (world.worldBots)
+    ++ map drawName (world.worldBots)
     ++ map drawBullet (world.worldBullets)
               )
 
